@@ -12,8 +12,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlsplit
+from urllib.request import ProxyHandler, Request, build_opener, urlopen
 
 from PhyAgentOS.config.paths import (
     get_forge_runtime_root,
@@ -577,7 +577,7 @@ class RuntimeManager:
     def _get_json(self, url: str) -> dict[str, Any]:
         request = Request(url, headers={"Accept": "application/json"})
         try:
-            with urlopen(request, timeout=2.0) as response:
+            with self._open_gateway_request(request, timeout=2.0) as response:
                 if response.status != 200:
                     raise RuntimeManagerError("Gateway health request failed")
                 value = json.loads(response.read().decode("utf-8"))
@@ -586,6 +586,21 @@ class RuntimeManager:
         if not isinstance(value, dict):
             raise RuntimeManagerError("Gateway health response must be a JSON object")
         return value
+
+    @staticmethod
+    def _open_gateway_request(request: Request, *, timeout: float) -> Any:
+        """Open loopback Gateway requests without inheriting HTTP proxy settings.
+
+        Skill gateways intentionally bind only to localhost.  A developer shell
+        commonly exports HTTP(S)_PROXY, and urllib may route even a localhost
+        health check through that proxy.  That makes a healthy gateway appear
+        unavailable to the lifecycle manager.  Preserve normal proxy behavior
+        for a non-local gateway URL while forcing direct loopback access.
+        """
+        host = (urlsplit(request.full_url).hostname or "").lower()
+        if host in {"localhost", "127.0.0.1", "::1"}:
+            return build_opener(ProxyHandler({})).open(request, timeout=timeout)
+        return urlopen(request, timeout=timeout)
 
     @staticmethod
     def _request_gateway_control(
@@ -602,7 +617,7 @@ class RuntimeManager:
             headers={"Accept": "application/json", "Content-Type": "application/json"},
         )
         try:
-            with urlopen(request, timeout=2.0) as response:
+            with RuntimeManager._open_gateway_request(request, timeout=2.0) as response:
                 outcome = "accepted" if response.status in {200, 202} else "rejected"
                 return {
                     "reference": reference,

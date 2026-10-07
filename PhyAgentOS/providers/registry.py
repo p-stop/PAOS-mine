@@ -198,6 +198,24 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         strip_model_prefix=False,
         model_overrides=(),
     ),
+    # OpenAI Responses API: direct adapter used by GPT-6 Astra tool calling.
+    ProviderSpec(
+        name="openai_responses",
+        keywords=("openai-responses", "openai_responses"),
+        env_key="OPENAI_API_KEY",
+        display_name="OpenAI Responses",
+        litellm_prefix="",
+        skip_prefixes=(),
+        env_extras=(),
+        is_gateway=False,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="",
+        default_api_base="https://api.openai.com/v1",
+        strip_model_prefix=False,
+        model_overrides=(),
+        is_direct=True,
+    ),
     # OpenAI Codex: uses OAuth, not API key.
     ProviderSpec(
         name="openai_codex",

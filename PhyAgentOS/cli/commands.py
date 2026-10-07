@@ -308,6 +308,22 @@ def _make_provider(
             api_base=api_base() or "http://localhost:8000/v1",
             default_model=model,
         )
+    # OpenAI Responses API: direct /responses calls with native function items.
+    elif provider_name == "openai_responses":
+        from PhyAgentOS.providers.openai_responses_provider import OpenAIResponsesProvider
+
+        if not p or not p.api_key:
+            console.print("[red]Error: OpenAI Responses requires an API key.[/red]")
+            console.print(
+                "Set it in ~/.PhyAgentOS/config.json under providers.openaiResponses"
+            )
+            raise typer.Exit(1)
+        provider = OpenAIResponsesProvider(
+            api_key=p.api_key,
+            api_base=api_base() or "https://api.openai.com/v1",
+            default_model=model,
+            extra_headers=p.extra_headers,
+        )
     # Azure OpenAI: direct Azure OpenAI endpoint with deployment name
     elif provider_name == "azure_openai":
         if not p or not p.api_key or not p.api_base:
