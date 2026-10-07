@@ -193,7 +193,19 @@ class LLMProvider(ABC):
         err = (content or "").lower()
         return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
 
-    async def chat_with_retry(
+    async def chat_with_retry(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        """Call ``chat()`` with retry and record the token usage of the response."""
+        response = await self._chat_with_retry_impl(*args, **kwargs)
+        try:
+            from PhyAgentOS.usage import meter
+
+            model = kwargs.get("model") or (args[2] if len(args) > 2 else None)
+            meter.record(model or self.get_default_model(), response.usage)
+        except Exception:  # accounting must never break a model call
+            pass
+        return response
+
+    async def _chat_with_retry_impl(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,

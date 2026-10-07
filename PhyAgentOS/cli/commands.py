@@ -166,6 +166,68 @@ def _print_agent_response(response: str, render_markdown: bool) -> None:
     console.print()
 
 
+async def _query_quota(config: Config) -> tuple[dict | None, str | None]:
+    """Return (quota, error) for the gateway behind the default model; never raises."""
+    from PhyAgentOS.usage import fetch_gateway_quota
+
+    try:
+        model = config.agents.defaults.model
+        provider = config.get_provider(model)
+        quota = await asyncio.to_thread(
+            fetch_gateway_quota, config.get_api_base(model), provider.api_key if provider else None
+        )
+        return quota, None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {str(exc)[:120]}"
+
+
+def _report_token_usage(config: Config, quota_before, quota_after, quota_error, session_id: str) -> None:
+    """Print this run's token usage and append it to logs/token-usage.jsonl."""
+    import json
+    import time
+
+    from PhyAgentOS.config.loader import get_config_path
+    from PhyAgentOS.usage import format_usage_report, meter
+
+    snapshot = meter.snapshot()
+    console.print(format_usage_report(snapshot, quota_before, quota_after, quota_error), highlight=False)
+    try:
+        log_path = get_config_path().parent / "logs" / "token-usage.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "session": session_id,
+            "usage": snapshot,
+            "quota_before": quota_before,
+            "quota_after": quota_after,
+        }
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
+async def _save_run_video(config: Config, session_id: str, start_ns: int) -> None:
+    """Cut the Skill's recorded frames for this task into workspace/videos/*.mp4; never raises."""
+    import re
+    import time
+
+    from PhyAgentOS.run_video import build_run_video, wait_until_idle
+
+    try:
+        await asyncio.to_thread(wait_until_idle)  # recording continues 10 s past execute_task
+        end_ns = time.time_ns()
+        name = re.sub(r"[^A-Za-z0-9._-]+", "_", session_id)
+        output = config.workspace_path / "videos" / f"{name}-{time.strftime('%Y%m%d-%H%M%S')}.mp4"
+        path, message = await asyncio.to_thread(build_run_video, output, start_ns, end_ns)
+        if path is not None:
+            console.print(f"任务视频已保存: {path}（{message}）", highlight=False)
+        elif message:
+            console.print(f"任务视频未生成: {message}", highlight=False)
+    except Exception as exc:
+        console.print(f"任务视频未生成: {type(exc).__name__}", highlight=False)
+
+
 def _is_exit_command(command: str) -> bool:
     """Return True when input should end interactive chat."""
     return command.lower() in EXIT_COMMANDS
@@ -819,6 +881,13 @@ def agent(
     if message:
         # Single message mode — direct call, no bus needed
         async def run_once():
+            from PhyAgentOS.usage import meter
+
+            import time
+
+            meter.reset()
+            task_start_ns = time.time_ns()
+            quota_before, _ = await _query_quota(config)
             try:
                 with _thinking_ctx():
                     response = await agent_loop.process_direct(message, session_id, on_progress=_cli_progress)
@@ -826,6 +895,9 @@ def agent(
             finally:
                 agent_loop.stop()
                 await agent_loop.close_mcp()
+                quota_after, quota_error = await _query_quota(config)
+                _report_token_usage(config, quota_before, quota_after, quota_error, session_id)
+                await _save_run_video(config, session_id, task_start_ns)
 
         asyncio.run(run_once())
     else:
@@ -856,6 +928,10 @@ def agent(
             signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
         async def run_interactive():
+            import time
+
+            from PhyAgentOS.usage import meter
+
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
             turn_done.set()
@@ -904,6 +980,9 @@ def agent(
 
                         turn_done.clear()
                         turn_response.clear()
+                        meter.reset()
+                        turn_start_ns = time.time_ns()
+                        quota_before, _ = await _query_quota(config)
 
                         await bus.publish_inbound(InboundMessage(
                             channel=cli_channel,
@@ -917,6 +996,11 @@ def agent(
 
                         if turn_response:
                             _print_agent_response(turn_response[0], render_markdown=markdown)
+                        # Same per-task report as `paos agent -m`: token usage, then the
+                        # video of any motion executed during this turn.
+                        quota_after, quota_error = await _query_quota(config)
+                        _report_token_usage(config, quota_before, quota_after, quota_error, session_id)
+                        await _save_run_video(config, session_id, turn_start_ns)
                     except KeyboardInterrupt:
                         _restore_terminal()
                         console.print("\nGoodbye!")
@@ -1636,6 +1720,25 @@ def channels_login():
 # ============================================================================
 # Status Commands
 # ============================================================================
+
+
+@app.command()
+def quota():
+    """Show the remaining API quota of the default model's gateway."""
+    from PhyAgentOS.config.loader import load_config
+
+    config = load_config()
+    result, error = asyncio.run(_query_quota(config))
+    if result is None:
+        console.print(f"[red]查询失败: {error}[/red]")
+        raise typer.Exit(1)
+    if result["unlimited"]:
+        console.print("API 额度: 不限额")
+    else:
+        console.print(
+            f"API 剩余额度: {result['available']:,} / 总额 {result['granted']:,}（已用 {result['used']:,}）",
+            highlight=False,
+        )
 
 
 @app.command()
